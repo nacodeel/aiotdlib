@@ -1,3 +1,6 @@
+> [!CAUTION]
+> **This repository is no longer maintained.** Forks and full code reuse in any form are welcome. Thank you to all contributors for their valuable contributions to this project.
+
 # aiotdlib - Python asyncio Telegram client based on [TDLib](https://github.com/tdlib/td)
 
 [![PyPI version shields.io](https://img.shields.io/pypi/v/aiotdlib.svg)](https://pypi.python.org/pypi/aiotdlib/)
