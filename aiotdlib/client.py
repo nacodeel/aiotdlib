@@ -403,6 +403,12 @@ class Client:
         if self.is_bot:
             return await self._check_authentication_bot_token()
 
+        # If phone number is not set, request QR code authentication
+        if not self.settings.phone_number:
+            self.logger.info("Phone number is not set, requesting QR code authentication")
+            await self._request_qr_code_authentication()
+            return
+
         return await self._set_authentication_phone_number()
 
     async def _set_authentication_phone_number(self, authorization_state: AuthorizationState = None):
