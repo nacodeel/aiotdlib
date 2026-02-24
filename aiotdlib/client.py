@@ -8,12 +8,14 @@ from functools import partial, update_wrapper
 from typing import AsyncIterator, Optional, Union
 
 import pydantic.errors
+import qrcode
 
 from .api import (
     API,
     AddProxy,
     AioTDLibError,
     AuthorizationState,
+    AuthorizationStateWaitOtherDeviceConfirmation,
     BaseObject,
     BasicGroup,
     BasicGroupFullInfo,
@@ -26,6 +28,7 @@ from .api import (
     CheckAuthenticationCode,
     CheckAuthenticationEmailCode,
     CheckAuthenticationPassword,
+    ConfirmQrCodeAuthentication,
     DisableProxy,
     EmailAddressAuthenticationCode,
     Error,
@@ -63,6 +66,7 @@ from .api import (
     ProxyTypeSocks5,
     RegisterUser,
     ReplyMarkup,
+    RequestQrCodeAuthentication,
     SecretChat,
     SetAuthenticationEmailAddress,
     SetAuthenticationPhoneNumber,
@@ -91,7 +95,7 @@ from .utils import PendingRequest, ainput, make_input_file, make_thumbnail, pars
 
 RequestResult = typing.TypeVar("RequestResult", bound=BaseObject, covariant=True)
 ExecuteResult = typing.TypeVar("ExecuteResult", bound=BaseObject, covariant=True)
-AuthActions = dict[Optional[str], typing.Callable[[], typing.Coroutine[None, None, None]]]
+AuthActions = dict[Optional[str], typing.Callable[[Optional[AuthorizationState]], typing.Coroutine[None, None, None]]]
 ChatInfo = Union[User, UserFullInfo, BasicGroup, BasicGroupFullInfo, Supergroup, SupergroupFullInfo, SecretChat]
 
 
@@ -369,11 +373,11 @@ class Client:
 
             await self.send(query)
 
-    async def _auth_start(self):
+    async def _auth_start(self, authorization_state: AuthorizationState = None):
         await self.send(GetAuthorizationState())
         # return await self.api.get_authorization_state(request_id=AUTHORIZATION_REQUEST_ID)
 
-    async def _set_tdlib_parameters(self):
+    async def _set_tdlib_parameters(self, authorization_state: AuthorizationState = None):
         await self.send(
             SetTdlibParameters(
                 database_encryption_key=self.settings.database_encryption_key,
@@ -393,7 +397,7 @@ class Client:
             )
         )
 
-    async def _set_authentication_phone_number_or_check_bot_token(self):
+    async def _set_authentication_phone_number_or_check_bot_token(self, authorization_state: AuthorizationState = None):
         await self.send(SetOption(name="online", value=OptionValueBoolean(value=True)))
 
         if self.is_bot:
@@ -401,7 +405,7 @@ class Client:
 
         return await self._set_authentication_phone_number()
 
-    async def _set_authentication_phone_number(self):
+    async def _set_authentication_phone_number(self, authorization_state: AuthorizationState = None):
         self.logger.info("Sending phone number")
         await self.send(
             SetAuthenticationPhoneNumber(
@@ -416,7 +420,7 @@ class Client:
             )
         )
 
-    async def _check_authentication_bot_token(self):
+    async def _check_authentication_bot_token(self, authorization_state: AuthorizationState = None):
         self.logger.info("Sending bot token")
         await self.send(
             CheckAuthenticationBotToken(
@@ -424,7 +428,7 @@ class Client:
             )
         )
 
-    async def _check_authentication_code(self):
+    async def _check_authentication_code(self, authorization_state: AuthorizationState = None):
         code = await self._auth_get_code(code_type="SMS")
         self.logger.info(f"Sending code {code}")
         await self.send(
@@ -433,7 +437,7 @@ class Client:
             )
         )
 
-    async def _set_authentication_email_address(self):
+    async def _set_authentication_email_address(self, authorization_state: AuthorizationState = None):
         email_address = await self._auth_get_email()
         await self.send(
             SetAuthenticationEmailAddress(
@@ -441,7 +445,7 @@ class Client:
             )
         )
 
-    async def _check_authentication_email_code(self):
+    async def _check_authentication_email_code(self, authorization_state: AuthorizationState = None):
         code = await self._auth_get_code(code_type="EMail")
         self.logger.info(f"Sending email code {code}")
         return await self.send(
@@ -450,7 +454,7 @@ class Client:
             )
         )
 
-    async def _register_user(self):
+    async def _register_user(self, authorization_state: AuthorizationState = None):
         first_name = await self._auth_get_first_name()
         last_name = await self._auth_get_last_name()
         self.logger.info(f"Registering new user in telegram as {first_name} {last_name or ''}".strip())
@@ -461,7 +465,7 @@ class Client:
             )
         )
 
-    async def _check_authentication_password(self):
+    async def _check_authentication_password(self, authorization_state: AuthorizationState = None):
         password = await self._auth_get_password()
         self.logger.info("Sending password")
         await self.send(
@@ -513,21 +517,78 @@ class Client:
 
         return email
 
-    async def _auth_completed(self):
+    async def _auth_completed(self, authorization_state: AuthorizationState = None):
         self._authorized_event.set()
 
         # if not self.is_bot:
         #     # Preload main list chats
         #     await self.get_main_list_chats()
 
-    async def _auth_logging_out(self):
+    async def _auth_logging_out(self, authorization_state: AuthorizationState = None):
         self.logger.info("Auth session is logging out")
 
-    async def _auth_closing(self):
+    async def _auth_closing(self, authorization_state: AuthorizationState = None):
         self.logger.info("Auth session is closing")
 
-    async def _auth_closed(self):
+    async def _auth_closed(self, authorization_state: AuthorizationState = None):
         self.logger.info("Auth session is closed")
+
+    async def _wait_other_device_confirmation(self, authorization_state: AuthorizationStateWaitOtherDeviceConfirmation = None):
+        """
+        Handle authorization state waiting for QR code confirmation from another device.
+        This method will be called automatically during authorization flow.
+        Displays QR code in console and waits for user to scan it with another Telegram device.
+
+        :param authorization_state: The authorization state containing QR code link
+        """
+        if authorization_state is None:
+            # Get current authorization state to retrieve the link
+            auth_state = await self.api.get_authorization_state()
+            if isinstance(auth_state, AuthorizationStateWaitOtherDeviceConfirmation):
+                authorization_state = auth_state
+
+        if authorization_state and hasattr(authorization_state, 'link'):
+            qr_link = authorization_state.link
+            self.logger.info(f"QR code link received: {qr_link}")
+            self._print_qr_code(qr_link)
+        else:
+            self.logger.warning("Could not retrieve QR code link")
+
+        self.logger.info("Waiting for QR code confirmation from another device")
+
+    def _print_qr_code(self, link: str) -> None:
+        """
+        Print QR code to console using ASCII art.
+
+        :param link: The tg:// URL for QR code authentication
+        """
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=1,
+            border=2,
+        )
+        qr.add_data(link)
+        qr.make(fit=True)
+
+        print("\n" + "=" * 60)
+        print("Scan QR code with Telegram app on another device to login:")
+        print("=" * 60)
+        qr.print_ascii(invert=True)
+        print("=" * 60)
+        print("Waiting for confirmation...")
+        print("=" * 60 + "\n")
+
+    async def _request_qr_code_authentication(self):
+        """
+        Request QR code authentication.
+        Works only when the current authorization state is authorizationStateWaitPhoneNumber,
+        or if there is no pending authentication query and the current authorization state is
+        authorizationStateWaitEmailAddress, authorizationStateWaitEmailCode, authorizationStateWaitCode,
+        authorizationStateWaitRegistration, or authorizationStateWaitPassword
+        """
+        self.logger.info("Requesting QR code authentication")
+        await self.send(RequestQrCodeAuthentication(other_user_ids=[]))
 
     async def _on_authorization_state_update(self, authorization_state: AuthorizationState):
         auth_actions: AuthActions = {
@@ -543,14 +604,13 @@ class Client:
             API.Types.AUTHORIZATION_STATE_LOGGING_OUT: self._auth_logging_out,
             API.Types.AUTHORIZATION_STATE_CLOSING: self._auth_closing,
             API.Types.AUTHORIZATION_STATE_CLOSED: self._auth_closed,
-            # TODO: QR Login support
-            # API.Types.AUTHORIZATION_STATE_WAIT_OTHER_DEVICE_CONFIRMATION: None,
+            API.Types.AUTHORIZATION_STATE_WAIT_OTHER_DEVICE_CONFIRMATION: self._wait_other_device_confirmation,
         }
 
         action = auth_actions.get(authorization_state.ID)
 
         if bool(action):
-            await action()
+            await action(authorization_state)
 
     async def _cleanup(self):
         self._pending_requests.clear()
@@ -653,18 +713,44 @@ class Client:
 
         return result_object
 
-    async def authorize(self):
+    async def authorize(self, *, show_qr: bool = True):
+        """
+        Start authorization process. Automatically determines authorization method:
+        - Bot token if bot_token is provided
+        - Phone number if phone_number is provided
+        - QR code if neither is provided
+
+        :param show_qr: If True and QR code auth is used, display QR code in console.
+        """
         if self.is_bot:
             self.logger.info("Authorization process has been started with bot token")
-        else:
+        elif self.settings.phone_number:
             self.logger.info("Authorization process has been started with phone")
+        else:
+            self.logger.info("Authorization process has been started with QR code")
+            # Request QR code authentication
+            await self._request_qr_code_authentication()
+            if show_qr:
+                # QR code will be displayed when we receive the authorization state update
+                pass
 
         await self.send(GetAuthorizationState())
-
         self.logger.info("Waiting for authorization to be completed")
         await self._authorized_event.wait()
 
-    async def start(self) -> "Client":
+    async def start(self, *, show_qr: bool = True) -> "Client":
+        """
+        Start the Telegram client.
+
+        Automatically determines the authorization method based on provided settings:
+        - If bot_token is provided: uses bot token authentication
+        - If phone_number is provided: uses phone number authentication  
+        - If neither is provided: uses QR code authentication (displays QR code in console)
+
+        :param show_qr: If True and QR code auth is used, display QR code in console.
+                       Ignored for phone/bot authentication.
+        :return: The client instance
+        """
         self.logger.info("Starting client")
         self.logger.info(f"Session workdir: {self.settings.files_directory.absolute()}")
 
@@ -683,7 +769,7 @@ class Client:
             self.logger.info("Setting up options")
             await self._setup_options()
             self.logger.info("Initialize authorization process")
-            await self.authorize()
+            await self.authorize(show_qr=show_qr)
         except asyncio.CancelledError:
             await self._cleanup()
             raise
@@ -692,13 +778,55 @@ class Client:
 
         return self
 
-    async def idle(self):
-        while True:
+    async def idle(self, *, stop_signals: tuple = None) -> None:
+        """
+        Idle the client to keep it running and process updates.
+
+        This method runs until the client is stopped or a stop signal is received.
+        It handles graceful shutdown on SIGINT/SIGTERM signals.
+
+        :param stop_signals: Tuple of signal numbers to handle for graceful shutdown.
+                            Defaults to (SIGINT, SIGTERM) on Unix systems.
+        """
+        import signal
+
+        if stop_signals is None:
+            # Default to handling SIGINT and SIGTERM on Unix systems
+            stop_signals = (signal.SIGINT, signal.SIGTERM)
+
+        # Create event for shutdown signal
+        shutdown_event = asyncio.Event()
+
+        def signal_handler(sig):
+            self.logger.info(f"Received signal {sig.name}, initiating graceful shutdown...")
+            shutdown_event.set()
+
+        # Register signal handlers
+        loop = asyncio.get_running_loop()
+        for sig in stop_signals:
             try:
-                await asyncio.sleep(0.1)
-            except asyncio.CancelledError:
-                self.logger.info("Stop Idling")
-                raise
+                loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+            except (NotImplementedError, ValueError):
+                # Signal handlers not supported on this platform (e.g., Windows)
+                self.logger.debug(f"Signal handler for {sig} not available on this platform")
+
+        self.logger.info("Client is now idling. Press Ctrl+C to stop.")
+
+        try:
+            # Wait for shutdown signal or cancellation
+            await shutdown_event.wait()
+        except asyncio.CancelledError:
+            self.logger.info("Idle task was cancelled")
+            raise
+        finally:
+            # Cleanup signal handlers
+            for sig in stop_signals:
+                try:
+                    loop.remove_signal_handler(sig)
+                except (NotImplementedError, ValueError):
+                    pass
+
+        self.logger.info("Shutdown signal received, stopping client...")
 
     async def stop(self):
         self.logger.info("Stopping telegram client")

@@ -293,9 +293,14 @@ class ClientSettings(pydantic_settings.BaseSettings):
     @model_validator(mode="before")
     @classmethod
     def check_phone_and_bot_token(cls, values):
-        if not bool(values.get("phone_number")) and not bool(values.get("bot_token")):
-            raise ValueError("Either phone_number or bot_token should be specified")
-
+        # For QR code authentication, phone_number and bot_token are not required initially
+        # They will be obtained after successful authentication
+        phone_number = values.get("phone_number")
+        bot_token = values.get("bot_token")
+        
+        # Allow None for both if QR code authentication will be used
+        # The session directory will be set after authentication
+        
         return values
 
     @field_validator("parse_mode", mode="before")
@@ -339,7 +344,9 @@ class ClientSettings(pydantic_settings.BaseSettings):
         elif bool(bot_token):
             session_name = str(bot_token)
         else:
-            raise ValueError
+            # For QR code authentication, use a temporary session name
+            # The actual session directory will be set after authentication
+            session_name = "qr_auth_temp"
 
         md5_hash.update(session_name.encode("utf-8"))
         directory_name = md5_hash.hexdigest()
