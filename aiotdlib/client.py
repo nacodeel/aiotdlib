@@ -116,6 +116,7 @@ class Client:
         self._middlewares: list[MiddlewareCallable] = []
         self._middlewares_handlers: list[MiddlewareCallable] = []
         self._update_task: typing.Optional[asyncio.Task[None]] = None
+        self._keep_online_task: typing.Optional[asyncio.Task[None]] = None
         self._handlers_tasks: set[asyncio.Task] = set()
         self.settings = settings or ClientSettings()
         self.tdjson_client = TDJsonClient.create(self.settings.library_path)
@@ -373,6 +374,23 @@ class Client:
 
             await self.send(query)
 
+    async def _keep_online(self):
+        """
+        Periodically send SetOption(online=True) to keep the session active.
+        TDLib may mark the user as offline after some time of inactivity.
+        This task ensures the client stays online and continues receiving messages.
+        """
+        try:
+            while self._running:
+                await asyncio.sleep(60)  # Update every 60 seconds
+                if self._running:
+                    await self.send(SetOption(name="online", value=OptionValueBoolean(value=True)))
+                    self.logger.debug("Keep-alive: online status updated")
+        except asyncio.CancelledError:
+            self.logger.debug("Keep-online task cancelled")
+        except Exception as e:
+            self.logger.error(f"Error in keep-online task: {e}", exc_info=True)
+
     async def _auth_start(self, authorization_state: AuthorizationState = None):
         await self.send(GetAuthorizationState())
         # return await self.api.get_authorization_state(request_id=AUTHORIZATION_REQUEST_ID)
@@ -398,8 +416,6 @@ class Client:
         )
 
     async def _set_authentication_phone_number_or_check_bot_token(self, authorization_state: AuthorizationState = None):
-        await self.send(SetOption(name="online", value=OptionValueBoolean(value=True)))
-
         if self.is_bot:
             return await self._check_authentication_bot_token()
 
@@ -627,6 +643,12 @@ class Client:
             self._update_task.cancel()
             await self._update_task
 
+        # Cancel keep-online task
+        if bool(self._keep_online_task) and not self._keep_online_task.cancelled():
+            self.logger.info("Cancelling keep-online task")
+            self._keep_online_task.cancel()
+            await self._keep_online_task
+
         # Cancel all background handlers tasks
         if bool(self._handlers_tasks):
             self.logger.info(f"Cancelling {len(self._handlers_tasks)} background handlers tasks")
@@ -784,6 +806,9 @@ class Client:
             await self._setup_options()
             self.logger.info("Initialize authorization process")
             await self.authorize(show_qr=show_qr)
+            
+            # Start keep-online task after successful authorization
+            self._keep_online_task = asyncio.create_task(self._keep_online())
         except asyncio.CancelledError:
             await self._cleanup()
             raise

@@ -172,7 +172,7 @@ class ClientOptions(pydantic.BaseModel):
     Maximum number of simultaneously shown notifications in a group, 1-25. Defaults to 10
     """
 
-    online: Optional[bool] = None
+    online: Optional[bool] = True
     """
     Online status of the current user
     """
