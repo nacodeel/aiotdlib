@@ -526,9 +526,14 @@ class Client:
     async def _auth_completed(self, authorization_state: AuthorizationState = None):
         self._authorized_event.set()
 
-        # if not self.is_bot:
-        #     # Preload main list chats
-        #     await self.get_main_list_chats()
+        if not self.is_bot:
+            # Preload main list chats to sync with account data
+            self.logger.info("Loading main list chats for synchronization")
+            try:
+                await self.get_main_list_chats(limit=100)
+                self.logger.info("Main list chats loaded successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to load main list chats: {e}", exc_info=True)
 
     async def _auth_logging_out(self, authorization_state: AuthorizationState = None):
         self.logger.info("Auth session is logging out")
