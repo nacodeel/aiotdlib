@@ -728,6 +728,15 @@ class Client:
 
         :param show_qr: If True and QR code auth is used, display QR code in console.
         """
+        # Get current authorization state
+        auth_state = await self.api.get_authorization_state()
+        
+        # If already authorized, skip the authorization process
+        if auth_state and auth_state.ID == API.Types.AUTHORIZATION_STATE_READY:
+            self.logger.info("Already authorized, skipping authorization process")
+            self._authorized_event.set()
+            return
+        
         if self.is_bot:
             self.logger.info("Authorization process has been started with bot token")
         elif self.settings.phone_number:
@@ -740,7 +749,6 @@ class Client:
                 # QR code will be displayed when we receive the authorization state update
                 pass
 
-        await self.send(GetAuthorizationState())
         self.logger.info("Waiting for authorization to be completed")
         await self._authorized_event.wait()
 
