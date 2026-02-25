@@ -95,7 +95,7 @@ from .utils import PendingRequest, ainput, make_input_file, make_thumbnail, pars
 
 RequestResult = typing.TypeVar("RequestResult", bound=BaseObject, covariant=True)
 ExecuteResult = typing.TypeVar("ExecuteResult", bound=BaseObject, covariant=True)
-AuthActions = dict[Optional[str], typing.Callable[[Optional[AuthorizationState]], typing.Coroutine[None, None, None]]]
+AuthActions = dict[str, typing.Callable[[Optional[AuthorizationState]], typing.Coroutine[None, None, None]]]
 ChatInfo = Union[User, UserFullInfo, BasicGroup, BasicGroupFullInfo, Supergroup, SupergroupFullInfo, SecretChat]
 
 
@@ -373,10 +373,6 @@ class Client:
 
             await self.send(query)
 
-    async def _auth_start(self, authorization_state: AuthorizationState = None):
-        await self.send(GetAuthorizationState())
-        # return await self.api.get_authorization_state(request_id=AUTHORIZATION_REQUEST_ID)
-
     async def _set_tdlib_parameters(self, authorization_state: AuthorizationState = None):
         await self.send(
             SetTdlibParameters(
@@ -525,15 +521,8 @@ class Client:
 
     async def _auth_completed(self, authorization_state: AuthorizationState = None):
         self._authorized_event.set()
-
-        if not self.is_bot:
-            # Preload main list chats to sync with account data
-            self.logger.info("Loading main list chats for synchronization")
-            try:
-                await self.get_main_list_chats(limit=100)
-                self.logger.info("Main list chats loaded successfully")
-            except Exception as e:
-                self.logger.error(f"Failed to load main list chats: {e}", exc_info=True)
+        # Чистый старт - не загружаем чаты автоматически после авторизации
+        # Пользователь может загрузить чаты вручную при необходимости через get_main_list_chats()
 
     async def _auth_logging_out(self, authorization_state: AuthorizationState = None):
         self.logger.info("Auth session is logging out")
@@ -603,7 +592,6 @@ class Client:
 
     async def _on_authorization_state_update(self, authorization_state: AuthorizationState):
         auth_actions: AuthActions = {
-            None: self._auth_start,
             API.Types.AUTHORIZATION_STATE_WAIT_TDLIB_PARAMETERS: self._set_tdlib_parameters,
             API.Types.AUTHORIZATION_STATE_WAIT_PHONE_NUMBER: self._set_authentication_phone_number_or_check_bot_token,
             API.Types.AUTHORIZATION_STATE_WAIT_CODE: self._check_authentication_code,
@@ -733,23 +721,17 @@ class Client:
 
         :param show_qr: If True and QR code auth is used, display QR code in console.
         """
-        # Get current authorization state
-        auth_state = await self.api.get_authorization_state()
-        
-        # If already authorized, skip the authorization process
-        if auth_state and auth_state.ID == API.Types.AUTHORIZATION_STATE_READY:
-            self.logger.info("Already authorized, skipping authorization process")
-            self._authorized_event.set()
-            return
-        
+        # Процесс авторизации запускается через _auth_start при получении UpdateAuthorizationState
+        # Здесь мы просто ждём завершения авторизации
+
         if self.is_bot:
             self.logger.info("Authorization process has been started with bot token")
         elif self.settings.phone_number:
             self.logger.info("Authorization process has been started with phone")
         else:
             self.logger.info("Authorization process has been started with QR code")
-            # Request QR code authentication
-            await self._request_qr_code_authentication()
+            # Request QR code authentication будет вызван в _set_authentication_phone_number_or_check_bot_token
+            # когда получим UpdateAuthorizationState
             if show_qr:
                 # QR code will be displayed when we receive the authorization state update
                 pass
@@ -788,6 +770,8 @@ class Client:
             self.logger.info("Setting up options")
             await self._setup_options()
             self.logger.info("Initialize authorization process")
+            # Явно отправляем запрос авторизации чтобы TDLib начал процесс
+            await self.send(GetAuthorizationState())
             await self.authorize(show_qr=show_qr)
         except asyncio.CancelledError:
             await self._cleanup()
